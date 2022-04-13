@@ -15,10 +15,11 @@ contract Market is ReentrancyGuard{
     uint256 curentRoundEndTime;
     uint256 private theHeadOfOrders;
 
-    Itoken private _boundedTkn;
-
+    using SafeERC20 for Itoken;
     using Counters for Counters.Counter;
     Counters.Counter private _ordersIds;
+    Itoken private _boundedTkn;
+
 
     enum Phase{
         Sale,
@@ -59,7 +60,7 @@ contract Market is ReentrancyGuard{
     event tknBoughtOnSale(uint256 amount, address buyer);
     event soldOut(uint256 endTime);
     
-
+    //mapping(address => mapping(address => address)) refs;
     mapping(uint256 => Orders) public IdToOrder;
     mapping(address => refers) public addrToRefers;
 
@@ -72,7 +73,7 @@ contract Market is ReentrancyGuard{
         theHeadOfOrders = 0;
         roundTime = _roundTime;
         roundInfo = RoundInfo(
-            5*1e17,
+            0,
             0,
             0,
             100000,
@@ -96,15 +97,17 @@ contract Market is ReentrancyGuard{
     }
 
     function addOrder(uint256 amountACDM, uint256 price) public {
-        _ordersIds.increment();
-        require(IdToOrder[_ordersIds.current()].amount == 0, "Already deployed order");
         require(roundInfo.nextPhase == Phase.Sale, "Current phase is not Trade");
 
-        SafeERC20.safeApprove(_boundedTkn, address(this), amountACDM);
-        SafeERC20.safeTransferFrom(_boundedTkn, msg.sender, address(this), amountACDM);
+        _boundedTkn.safeTransferFrom(msg.sender, address(this), amountACDM);
+        _ordersIds.increment();
+        console.log(_ordersIds.current());
+
         IdToOrder[_ordersIds.current()].amount = amountACDM;
         IdToOrder[_ordersIds.current()].price = price;
         IdToOrder[_ordersIds.current()].owner = msg.sender;
+        console.log(IdToOrder[_ordersIds.current()].amount);
+
         
         IdToOrder[theHeadOfOrders].pointTo = _ordersIds.current();
         IdToOrder[_ordersIds.current()].pointFrom = theHeadOfOrders;
@@ -114,13 +117,16 @@ contract Market is ReentrancyGuard{
     }
 
     function removeOrder(uint256 orderId) public {
-        require(IdToOrder[orderId].amount == 0, "Already deployed order");
-        require(msg.sender == IdToOrder[orderId].owner, "Not an owner");
+        
+
         require(roundInfo.nextPhase == Phase.Sale, "Current phase is not Trade");
         require(orderId != 0, "Id is not valid");
         require(orderId <= theHeadOfOrders, "Id is not valid");
+        require(msg.sender == IdToOrder[orderId].owner || msg.sender == address(this), "Not an owner");
+        require(IdToOrder[orderId].amount != 0, "Already removed order");
 
-        SafeERC20.safeTransfer(_boundedTkn, msg.sender, IdToOrder[_ordersIds.current()].amount);
+
+        _boundedTkn.safeTransfer(msg.sender, IdToOrder[_ordersIds.current()].amount);
         IdToOrder[_ordersIds.current()].amount = 0;
         IdToOrder[_ordersIds.current()].price = 0;
         IdToOrder[_ordersIds.current()].owner = address(0);
@@ -138,32 +144,31 @@ contract Market is ReentrancyGuard{
         
     }
 
-    function redeemOerder(uint256 orderId) external payable nonReentrant{
-        require(IdToOrder[orderId].amount >= msg.value * IdToOrder[orderId].price, "Not enough supply to buy");
+    function redeemOrder(uint256 orderId) external payable nonReentrant{
         require(roundInfo.nextPhase == Phase.Sale, "Current phase is not Trade");
+        require(IdToOrder[orderId].amount > 0, "There is no order by given Id");
+        require(IdToOrder[orderId].amount >= msg.value / IdToOrder[orderId].price, "Not enough supply to buy");
 
         bool sent;
         bytes memory data;
-        this.sendToContractFromSender();
-
         if(addrToRefers[msg.sender].lvl1 != address(0) && addrToRefers[msg.sender].lvl2 != address(0)){
 
-            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (IdToOrder[orderId].price  * msg.value * 5 / 200)}("");
+            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (msg.value / IdToOrder[orderId].price * 5 / 200)}("");
             require(sent, "Failed to send Ether");
-            (sent, data) = addrToRefers[msg.sender].lvl2.call{value: (IdToOrder[orderId].price * msg.value * 5 / 200)}("");
+            (sent, data) = addrToRefers[msg.sender].lvl2.call{value: (msg.value / IdToOrder[orderId].price * 5 / 200)}("");
             require(sent, "Failed to send Ether");
 
         }else if(addrToRefers[msg.sender].lvl1 != address(0)){
-            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (IdToOrder[orderId].price * msg.value * 5 / 200)}("");//questionable is it 2.5 or round(2.5)~3?
+            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (msg.value / IdToOrder[orderId].price * 5 / 200)}("");//questionable is it 2.5 or round(2.5)~3?
             require(sent, "Failed to send Ether");
         }
-        SafeERC20.safeTransfer(_boundedTkn, msg.sender, IdToOrder[orderId].price * msg.value);
-        IdToOrder[orderId].amount -= roundInfo.currentPriceForSale * msg.value;
+        _boundedTkn.safeTransfer(msg.sender, msg.value / IdToOrder[orderId].price);
+        IdToOrder[orderId].amount -= msg.value / IdToOrder[orderId].price;
         roundInfo.tradesDone += 1;
         roundInfo.ethSpentDurTrade += msg.value;
-        emit redeemed(orderId, IdToOrder[orderId].price * msg.value, IdToOrder[orderId].price, IdToOrder[orderId].owner, msg.sender);
+        emit redeemed(orderId, msg.value / IdToOrder[orderId].price, IdToOrder[orderId].price, IdToOrder[orderId].owner, msg.sender);
         if(IdToOrder[orderId].amount == 0){
-            this.redeemOerder(orderId);
+            this.removeOrder(orderId);
         }
 
 
@@ -180,7 +185,7 @@ contract Market is ReentrancyGuard{
         if(roundInfo.tradesDone > 0){
             this.removeAllOrders();
 
-        
+        console.log(roundInfo.ethSpentDurTrade);
         if (roundInfo.init == false){
             roundInfo.currentPriceForSale =roundInfo.currentPriceForSale * 103 / 100 + (4 * 1e11);
             roundInfo.amountToMint = roundInfo.ethSpentDurTrade / roundInfo.currentPriceForSale;
@@ -196,6 +201,8 @@ contract Market is ReentrancyGuard{
         roundInfo.nextPhase = Phase.Trade;
         roundInfo.tknBoughtDurSale = 0;
         roundInfo.ethSpentDurTrade = 0;
+        console.log(roundInfo.amountToMint);
+        console.log(roundInfo.currentPriceForSale);
 
         }else{
             roundInfo.endTime = block.timestamp + roundTime * 1 days;
@@ -216,42 +223,44 @@ contract Market is ReentrancyGuard{
         roundInfo.amountToBurn = roundInfo.amountToMint - roundInfo.tknBoughtDurSale;
     }
 
-    function sendToContractFromSender() external payable{}   
-
     function buyTokens() external payable nonReentrant{
         bool sent;
         bytes memory data;
-        require(roundInfo.currentPriceForSale * msg.value + roundInfo.tknBoughtDurSale <= roundInfo.amountToMint, "Not enough tkn supply");
-        this.sendToContractFromSender();
+        require(msg.value / roundInfo.currentPriceForSale + roundInfo.tknBoughtDurSale <= roundInfo.amountToMint, "Not enough tkn supply");
+        require(roundInfo.nextPhase == Phase.Trade, "Current phase is not Sale");
+
 
         if(addrToRefers[msg.sender].lvl1 != address(0) && addrToRefers[msg.sender].lvl2 != address(0)){
 
-            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (roundInfo.currentPriceForSale * msg.value * 5 / 100)}("");
+            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (msg.value / roundInfo.currentPriceForSale * 5 / 100)}("");
             require(sent, "Failed to send Ether");
-            (sent, data) = addrToRefers[msg.sender].lvl2.call{value: (roundInfo.currentPriceForSale * msg.value * 3 / 100)}("");
+            (sent, data) = addrToRefers[msg.sender].lvl2.call{value: (msg.value / roundInfo.currentPriceForSale * 3 / 100)}("");
             require(sent, "Failed to send Ether");
 
         }else if(addrToRefers[msg.sender].lvl1 != address(0)){
-            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (roundInfo.currentPriceForSale * msg.value * 5 / 100)}("");
+            (sent, data) = addrToRefers[msg.sender].lvl1.call{value: (msg.value / roundInfo.currentPriceForSale * 5 / 100)}("");
             require(sent, "Failed to send Ether");
         }
-        SafeERC20.safeTransfer(_boundedTkn, msg.sender, roundInfo.currentPriceForSale * msg.value);
-        roundInfo.tknBoughtDurSale += (msg.value * roundInfo.currentPriceForSale);
+        _boundedTkn.safeTransfer(msg.sender, msg.value / roundInfo.currentPriceForSale);
+        roundInfo.tknBoughtDurSale += (msg.value / roundInfo.currentPriceForSale);
 
-        emit tknBoughtOnSale(roundInfo.currentPriceForSale * msg.value, msg.sender);
+        emit tknBoughtOnSale(msg.value / roundInfo.currentPriceForSale, msg.sender);
         if(roundInfo.amountToMint == roundInfo.tknBoughtDurSale){
+            roundInfo.endTime = block.timestamp;
             emit soldOut(roundInfo.endTime);
         }
     }
     
     function removeAllOrders() public{
         require(msg.sender == address(this), "revert test");
-        uint256 numb = 0;
-        while(numb != theHeadOfOrders){
-            this.removeOrder(numb);
-            numb += 1;
+
+        while(theHeadOfOrders != 0){
+            this.removeOrder(IdToOrder[0].pointTo);
         }
-        theHeadOfOrders = 0;
+    }
+
+    function getBalance()public view returns(uint256){
+        return address(this).balance;
     }
 
     
